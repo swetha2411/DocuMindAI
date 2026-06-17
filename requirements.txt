@@ -6,7 +6,7 @@ langchain-community==0.4.2
 langchain-google-genai==4.2.5
 langchain-chroma==1.1.0
 langchain-text-splitters==1.1.2
-langchain-core==0.3.0
+langchain-core==1.4.7
 
 chromadb==1.0.13
 
