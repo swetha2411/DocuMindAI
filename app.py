@@ -1,6 +1,6 @@
 import os
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -21,7 +21,7 @@ from langchain_core.messages import (
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="dist", static_url_path="")
 CORS(app)
 
 UPLOAD_FOLDER = "pdfs"
@@ -44,15 +44,14 @@ def get_chat_history(session_id):
     return chat_histories[session_id]
 
 
+    
 @app.route("/")
-def home():
+def serve():
+    return send_from_directory(app.static_folder, "index.html")
 
-    return jsonify(
-        {
-            "message":
-            "DocuMindAI Backend Running"
-        }
-    )
+@app.route("/<path:path>")
+def static_files(path):
+    return send_from_directory(app.static_folder, path)
 
 
 @app.route("/health", methods=["GET"])
