@@ -2,6 +2,6 @@ services:
   - type: web
     name: documindai
     env: python
+    runtime: python-3.11.9
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
-    runtime: python-3.11.9
