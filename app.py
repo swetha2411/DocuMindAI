@@ -13,256 +13,175 @@ from langchain_google_genai import (
 )
 
 from langchain_chroma import Chroma
-
-from langchain_core.messages import (
-    HumanMessage,
-    AIMessage
-)
+from langchain_core.messages import HumanMessage, AIMessage
 
 load_dotenv()
 
+# ✅ FIX: proper static serving setup
 app = Flask(__name__, static_folder="dist", static_url_path="")
 CORS(app)
 
 UPLOAD_FOLDER = "pdfs"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-os.makedirs(
-    UPLOAD_FOLDER,
-    exist_ok=True
-)
-
-# Session memory storage
+# In-memory chat history (OK for demo, not production scale)
 chat_histories = {}
 
-
 def get_chat_history(session_id):
-
     if session_id not in chat_histories:
-
         chat_histories[session_id] = []
-
     return chat_histories[session_id]
 
 
-    
+# =========================
+# FRONTEND SERVING
+# =========================
+
 @app.route("/")
 def serve():
     return send_from_directory(app.static_folder, "index.html")
+
 
 @app.route("/<path:path>")
 def static_files(path):
     return send_from_directory(app.static_folder, path)
 
 
+# =========================
+# HEALTH CHECK
+# =========================
+
 @app.route("/health", methods=["GET"])
 def health():
+    return jsonify({"status": "ok"})
 
-    return jsonify(
-        {
-            "status": "ok"
-        }
-    )
 
+# =========================
+# UPLOAD PDF
+# =========================
 
 @app.route("/upload", methods=["POST"])
 def upload_pdf():
-
-    print("\n===== PDF UPLOAD REQUEST =====")
-
-    if "file" not in request.files:
-
-        return jsonify(
-            {
-                "error":
-                "No file uploaded"
-            }
-        ), 400
-
-    file = request.files["file"]
-
-    if file.filename == "":
-
-        return jsonify(
-            {
-                "error":
-                "No file selected"
-            }
-        ), 400
-
-    if not file.filename.lower().endswith(".pdf"):
-
-        return jsonify(
-            {
-                "error":
-                "Only PDF files allowed"
-            }
-        ), 400
-
-    filepath = os.path.join(
-        UPLOAD_FOLDER,
-        file.filename
-    )
-
-    file.save(filepath)
-
-    print(
-        f"Saved file: {filepath}"
-    )
-
     try:
+        print("\n===== PDF UPLOAD REQUEST =====")
 
-        loader = PyMuPDFLoader(
-            filepath
-        )
+        if "file" not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
 
+        file = request.files["file"]
+
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+
+        if not file.filename.lower().endswith(".pdf"):
+            return jsonify({"error": "Only PDF files allowed"}), 400
+
+        filepath = os.path.join(UPLOAD_FOLDER, file.filename)
+        file.save(filepath)
+
+        print(f"Saved file: {filepath}")
+
+        # Load PDF
+        loader = PyMuPDFLoader(filepath)
         documents = loader.load()
 
-        print(
-            f"Loaded {len(documents)} pages"
-        )
+        print(f"Loaded {len(documents)} pages")
 
+        # Split text
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200
         )
 
-        chunks = splitter.split_documents(
-            documents
-        )
+        chunks = splitter.split_documents(documents)
 
-        print(
-            f"Created {len(chunks)} chunks"
-        )
+        print(f"Created {len(chunks)} chunks")
+
+        # Check API key
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise Exception("GEMINI_API_KEY not set in environment variables")
 
         embeddings = GoogleGenerativeAIEmbeddings(
             model="gemini-embedding-001",
-            google_api_key=os.getenv(
-                "GEMINI_API_KEY"
-            )
+            google_api_key=api_key
         )
 
+        # ✅ FIX: Render-safe storage path
         Chroma.from_documents(
             documents=chunks,
             embedding=embeddings,
-            persist_directory="./chroma_db"
+            persist_directory="/tmp/chroma_db"
         )
 
-        print(
-            f"Stored {len(chunks)} chunks in ChromaDB"
-        )
+        print(f"Stored {len(chunks)} chunks in ChromaDB")
 
-        return jsonify(
-            {
-                "status": "ready",
-                "chunks": len(chunks)
-            }
-        )
+        return jsonify({
+            "status": "ready",
+            "chunks": len(chunks)
+        })
 
     except Exception as e:
+        import traceback
+        print("UPLOAD ERROR TRACEBACK:")
+        print(traceback.format_exc())
 
-        print("UPLOAD ERROR:", str(e))
+        return jsonify({"error": str(e)}), 500
 
-        return jsonify(
-            {
-                "error": str(e)
-            }
-        ), 500
 
+# =========================
+# ASK QUESTION (RAG)
+# =========================
 
 @app.route("/ask", methods=["POST"])
 def ask():
-
     try:
-
         print("\n===== QUESTION REQUEST =====")
 
         data = request.get_json()
-
-        question = data.get(
-            "question"
-        )
-
-        session_id = data.get(
-            "session_id",
-            "default"
-        )
+        question = data.get("question")
+        session_id = data.get("session_id", "default")
 
         if not question:
+            return jsonify({"error": "Question required"}), 400
 
-            return jsonify(
-                {
-                    "error":
-                    "Question required"
-                }
-            ), 400
+        print(f"Session ID: {session_id}")
+        print(f"Question: {question}")
 
-        print(
-            f"Session ID: {session_id}"
-        )
-
-        print(
-            f"Question: {question}"
-        )
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise Exception("GEMINI_API_KEY not set in environment variables")
 
         embeddings = GoogleGenerativeAIEmbeddings(
             model="gemini-embedding-001",
-            google_api_key=os.getenv(
-                "GEMINI_API_KEY"
-            )
+            google_api_key=api_key
         )
 
         db = Chroma(
-            persist_directory="./chroma_db",
+            persist_directory="/tmp/chroma_db",
             embedding_function=embeddings
         )
 
-        retriever = db.as_retriever(
-            search_kwargs={"k": 10}
-        )
+        retriever = db.as_retriever(search_kwargs={"k": 5})
 
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
-            google_api_key=os.getenv(
-                "GEMINI_API_KEY"
-            )
+            google_api_key=api_key
         )
 
-        # Load chat history
-
-        chat_history = get_chat_history(
-            session_id
-        )
+        # Chat history
+        chat_history = get_chat_history(session_id)
 
         history_text = ""
-
         for msg in chat_history:
+            if isinstance(msg, HumanMessage):
+                history_text += f"User: {msg.content}\n"
+            elif isinstance(msg, AIMessage):
+                history_text += f"Assistant: {msg.content}\n"
 
-            if isinstance(
-                msg,
-                HumanMessage
-            ):
-
-                history_text += (
-                    f"User: {msg.content}\n"
-                )
-
-            elif isinstance(
-                msg,
-                AIMessage
-            ):
-
-                history_text += (
-                    f"Assistant: {msg.content}\n"
-                )
-
-        print("\n===== CHAT HISTORY =====")
-        print(history_text)
-
-        # Rewrite follow-up question
-
+        # Rewrite question
         rewrite_prompt = f"""
-Given the chat history and latest question,
-rewrite the latest question so it is fully standalone.
+Rewrite this question into a standalone question.
 
 History:
 {history_text}
@@ -271,58 +190,23 @@ Question:
 {question}
 """
 
-        standalone_question = (
-            llm.invoke(
-                rewrite_prompt
-            ).content
-        )
+        standalone_question = llm.invoke(rewrite_prompt).content
 
-        print(
-            "\nStandalone Question:"
-        )
-        print(
-            standalone_question
-        )
+        print("Standalone Question:", standalone_question)
 
-        # Retrieve documents
+        # Retrieve docs
+        docs = retriever.invoke(standalone_question)
 
-        docs = retriever.invoke(
-            standalone_question
-        )
+        print(f"Retrieved {len(docs)} chunks")
 
-        print(
-        f"\nRetrieved {len(docs)} chunks"
-        )
+        context = "\n\n".join(doc.page_content for doc in docs)
 
-        for i, doc in enumerate(docs):
-            print(f"\n===== CHUNK {i+1} =====")
-            print(doc.page_content[:500])
-
-        context = "\n\n".join(
-            doc.page_content
-            for doc in docs
-        )
-        
-        print("\n===== CONTEXT SENT TO GEMINI =====")
-        print(context[:3000])
-
-        # Final RAG prompt
-
+        # Final prompt
         prompt = f"""
-You are answering questions about the uploaded PDF.
+You are a helpful assistant answering based only on the document.
 
-Use ONLY information from the context.
-
-If the context contains enough information,
-answer clearly and briefly.
-
-If the answer cannot be found in the context,
-respond exactly:
-
+If answer not found, say:
 Not found in document
-
-Chat History:
-{history_text}
 
 Context:
 {context}
@@ -331,80 +215,37 @@ Question:
 {question}
 """
 
-        response = llm.invoke(
-            prompt
-        )
-
-        print(
-            "\n===== ANSWER ====="
-        )
-
-        print(
-            response.content
-        )
+        response = llm.invoke(prompt)
 
         # Save memory
+        chat_history.append(HumanMessage(content=question))
+        chat_history.append(AIMessage(content=response.content))
 
-        chat_history.append(
-            HumanMessage(
-                content=question
-            )
-        )
-
-        chat_history.append(
-            AIMessage(
-                content=response.content
-            )
-        )
-
-        print(
-            f"\nMessages Stored: {len(chat_history)}"
-        )
-
-        sources = []
-
-        for doc in docs:
-
-            sources.append(
-                {
-                    "page":
-                    doc.metadata.get(
-                        "page",
-                        0
-                    )+1,
-
-                    "text":
-                    doc.page_content[:300]
-                }
-            )
-
-        return jsonify(
+        sources = [
             {
-                "answer":
-                response.content,
-
-                "sources":
-                sources
+                "page": doc.metadata.get("page", 0) + 1,
+                "text": doc.page_content[:300]
             }
-        )
+            for doc in docs
+        ]
+
+        return jsonify({
+            "answer": response.content,
+            "sources": sources
+        })
 
     except Exception as e:
+        import traceback
+        print("ASK ERROR TRACEBACK:")
+        print(traceback.format_exc())
 
-        print(
-            "ASK ERROR:",
-            str(e)
-        )
+        return jsonify({"error": str(e)}), 500
 
-        return jsonify(
-            {
-                "error":
-                str(e)
-            }
-        ), 500
 
+# =========================
+# RUN APP
+# =========================
 
 if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000))
-    )
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
